@@ -3223,8 +3223,26 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
         }
     }
 
+    // DIATER-HOOK(virtual-location/telephony.cell.filter): whether cell information is hidden
+    // from a virtual location target. LocationManager caches the answer in this process until
+    // the policies change. A failed query is not a known target, so stock behavior applies.
+    private boolean shouldHideLocationEnvironment(int uid) {
+        long token = Binder.clearCallingIdentity();
+        try {
+            android.location.LocationManager location = mApp.getSystemService(
+                    android.location.LocationManager.class);
+            return location != null && location.shouldHideLocationEnvironment(uid);
+        } catch (RuntimeException | LinkageError e) {
+            loge("virtual location environment query failed: " + e);
+            return false;
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
     @Override
     public CellIdentity getCellLocation(String callingPackage, String callingFeatureId) {
+        final int callerUid = Binder.getCallingUid();
         mApp.getSystemService(AppOpsManager.class)
                 .checkPackage(Binder.getCallingUid(), callingPackage);
 
@@ -3250,6 +3268,10 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
 
         enforceTelephonyFeatureWithException(callingPackage,
                 PackageManager.FEATURE_TELEPHONY_RADIO_ACCESS, "getCellLocation");
+
+        if (shouldHideLocationEnvironment(callerUid)) {
+            return null;
+        }
 
         WorkSource workSource = getWorkSource(Binder.getCallingUid());
         final long identity = Binder.clearCallingIdentity();
@@ -3369,6 +3391,7 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
 
     @Override
     public List<CellInfo> getAllCellInfo(String callingPackage, String callingFeatureId) {
+        final int callerUid = Binder.getCallingUid();
         mApp.getSystemService(AppOpsManager.class)
                 .checkPackage(Binder.getCallingUid(), callingPackage);
 
@@ -3392,6 +3415,10 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
 
         enforceTelephonyFeatureWithException(callingPackage,
             PackageManager.FEATURE_TELEPHONY_RADIO_ACCESS, "getAllCellInfo");
+
+        if (shouldHideLocationEnvironment(callerUid)) {
+            return Collections.emptyList();
+        }
 
         mAppOps = Objects.requireNonNull(
             getDefaultPhone().getContext().getSystemService(AppOpsManager.class));
@@ -3490,7 +3517,28 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
         final Phone phone = getPhoneFromSubId(subId);
         if (phone == null) throw new IllegalArgumentException("Invalid Subscription Id: " + subId);
 
-        sendRequestAsync(CMD_REQUEST_CELL_INFO_UPDATE, cb, phone, workSource);
+        final int callerUid = Binder.getCallingUid();
+        ICellInfoCallback scopedCallback = new ICellInfoCallback.Stub() {
+            @Override
+            public void onCellInfo(List<CellInfo> info) throws RemoteException {
+                cb.onCellInfo(shouldHideLocationEnvironment(callerUid)
+                        ? Collections.emptyList() : info);
+            }
+
+            @Override
+            public void onError(int code, String name, String message) throws RemoteException {
+                cb.onError(code, name, message);
+            }
+        };
+        if (shouldHideLocationEnvironment(callerUid)) {
+            try {
+                cb.onCellInfo(Collections.emptyList());
+            } catch (RemoteException e) {
+                // Requesting process is no longer alive.
+            }
+            return;
+        }
+        sendRequestAsync(CMD_REQUEST_CELL_INFO_UPDATE, scopedCallback, phone, workSource);
     }
 
     @Override
@@ -8364,6 +8412,7 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
     @Override
     public ServiceState getServiceStateForSlot(int slotIndex, boolean renounceFineLocationAccess,
             boolean renounceCoarseLocationAccess, String callingPackage, String callingFeatureId) {
+        final int callerUid = Binder.getCallingUid();
         Phone phone = PhoneFactory.getPhone(slotIndex);
         if (phone == null) {
             loge("getServiceStateForSlot retuning null for invalid slotIndex=" + slotIndex);
@@ -8427,6 +8476,9 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
             }
 
             ServiceState ss = phone.getServiceState();
+            if (shouldHideLocationEnvironment(callerUid)) {
+                return ss.createLocationInfoSanitizedCopy(true);
+            }
             boolean isCallingPackageDataService = phone.getDataServicePackages()
                     .contains(callingPackage);
 
